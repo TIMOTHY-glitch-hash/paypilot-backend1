@@ -3,36 +3,38 @@ const cors = require('cors');
 const { createClient } = require('@supabase/supabase-js');
 require('dotenv').config();
 
-console.log('Starting server...');
-console.log('SUPABASE_URL:', process.env.SUPABASE_URL ? 'Set' : 'Missing');
-console.log('SUPABASE_KEY:', process.env.SUPABASE_KEY ? 'Set' : 'Missing');
-
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-const corsOptions = {
-  origin: ['https://paypilot-frontend.vercel.app', 'http://localhost:5173'],
+// CORS - allow all origins for testing
+app.use(cors({
+  origin: '*',
   methods: ['GET', 'POST', 'OPTIONS'],
-  allowedHeaders: ['Content-Type'],
-  credentials: true
-};
+  allowedHeaders: ['Content-Type']
+}));
 
-app.use(cors(corsOptions));
 app.use(express.json());
 
-let supabase;
-try {
-  supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
-  console.log('✅ Supabase connected');
-} catch (error) {
-  console.error('❌ Supabase connection failed:', error.message);
-  process.exit(1);
-}
+// Supabase client
+const supabase = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_KEY);
 
+// Health check - MUST respond quickly
 app.get('/', (req, res) => {
   res.json({ status: 'PayPilot API is running' });
 });
 
+// Test Supabase connection
+app.get('/health', async (req, res) => {
+  try {
+    const { data, error } = await supabase.from('transactions').select('count').limit(0);
+    if (error) throw error;
+    res.json({ status: 'ok', supabase: 'connected' });
+  } catch (error) {
+    res.status(500).json({ status: 'error', message: error.message });
+  }
+});
+
+// Get user transactions
 app.get('/api/transactions/:userId', async (req, res) => {
   try {
     const { data, error } = await supabase
@@ -48,6 +50,7 @@ app.get('/api/transactions/:userId', async (req, res) => {
   }
 });
 
+// Initiate payment
 app.post('/api/pay', async (req, res) => {
   try {
     const { amount, email, userId } = req.body;
@@ -57,6 +60,7 @@ app.post('/api/pay', async (req, res) => {
     }
 
     const reference = `PP-${Date.now()}`;
+    
     const { data: tx, error } = await supabase
       .from('transactions')
       .insert([{
@@ -67,7 +71,10 @@ app.post('/api/pay', async (req, res) => {
       }])
       .select();
 
-    if (error) throw error;
+    if (error) {
+      console.error('Supabase insert error:', error);
+      throw error;
+    }
 
     res.json({
       success: true,
@@ -76,10 +83,31 @@ app.post('/api/pay', async (req, res) => {
       message: 'Payment initiated. Flutterwave integration pending.',
     });
   } catch (error) {
+    console.error('Payment error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
-app.listen(PORT, () => {
+// Flutterwave webhook
+app.post('/api/webhooks/flutterwave', async (req, res) => {
+  try {
+    const { status, tx_ref, transaction_id } = req.body;
+
+    await supabase
+      .from('transactions')
+      .update({
+        status: status === 'successful' ? 'success' : 'failed',
+        flutterwave_ref: transaction_id,
+      })
+      .eq('reference', tx_ref);
+
+    res.sendStatus(200);
+  } catch (error) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// Start server - listen on 0.0.0.0 to accept external connections
+app.listen(PORT, '0.0.0.0', () => {
   console.log(`🚀 Server running on port ${PORT}`);
 });
